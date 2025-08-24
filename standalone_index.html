@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Dashboard de Laboratorio (Standalone)</title>
+    <style>
+      /* Pequeño set de utilidades para no depender de Tailwind */
+      body{margin:0;background:#f3f4f6;font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial}
+      .p-6{padding:1.5rem}.p-4{padding:1rem}.mb-4{margin-bottom:1rem}.mb-6{margin-bottom:1.5rem}
+      .bg-white{background:#fff}.bg-gray-50{background:#f9fafb}.bg-gray-100{background:#f3f4f6}.bg-gray-200{background:#e5e7eb}
+      .rounded-2xl{border-radius:1rem}.rounded{border-radius:.25rem}
+      .shadow{box-shadow:0 10px 15px -3px rgba(0,0,0,.1),0 4px 6px -2px rgba(0,0,0,.05)}
+      .text-center{text-align:center}.text-sm{font-size:.875rem}.text-base{font-size:1rem}.text-lg{font-size:1.125rem}
+      .text-xl{font-size:1.25rem}.text-2xl{font-size:1.5rem}.text-3xl{font-size:1.875rem}
+      .font-bold{font-weight:700}.font-medium{font-weight:500}.text-gray-500{color:#6b7280}.text-gray-700{color:#374151}
+      .grid{display:grid}.grid-cols-1{grid-template-columns:repeat(1,minmax(0,1fr))}
+      .gap-6{gap:1.5rem}.gap-4{gap:1rem}.gap-2{gap:.5rem}.flex{display:flex}.items-center{align-items:center}.justify-between{justify-content:space-between}.justify-center{justify-content:center}.flex-wrap{flex-wrap:wrap}
+      .w-full{width:100%}.h-2{height:.5rem}.h-\[300px\]{height:300px}.min-h-screen{min-height:100vh}
+      .border{border:1px solid #e5e7eb}.border-b{border-bottom:1px solid #e5e7eb}.border-collapse{border-collapse:collapse}
+      .hover\:bg-gray-50:hover{background:#f9fafb}
+      .px-4{padding-left:1rem;padding-right:1rem}.py-2{padding-top:.5rem;padding-bottom:.5rem}.px-3{padding-left:.75rem;padding-right:.75rem}.py-1\.5{padding-top:.375rem;padding-bottom:.375rem}
+      .rounded-2xl{border-radius:1rem}
+      .w-48{width:12rem}
+      .text-\[11px\]{font-size:11px}
+      .relative{position:relative}.absolute{position:absolute}.inset-0{top:0;right:0;bottom:0;left:0}
+      .pointer-events-none{pointer-events:none}
+      .overflow-x-auto{overflow-x:auto}
+      table{width:100%}
+      button{cursor:pointer}
+      .btn{border-radius:1rem;box-shadow:0 1px 2px rgba(0,0,0,.05);font-size:.875rem;font-weight:500;padding:.5rem 1rem;border:1px solid transparent;background:#111827;color:#fff}
+      .btn-outline{border:1px solid #d1d5db;background:#fff;color:#374151}
+      input, select{border:1px solid #d1d5db;border-radius:.25rem;padding:.5rem;font-size:.875rem;width:100%}
+    </style>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/recharts/umd/Recharts.min.js"></script>
+  </head>
+  <body class="bg-gray-100">
+    <div id="root"></div>
+
+    <script type="text/babel">
+      const { useState, useEffect } = React;
+      const { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Legend } = Recharts;
+
+      const STAGE_DEADLINES = { Ingreso:5, Pesaje:70, Ataque:300, Lectura:60, Reporte:60, 'Validación de resultados':5 };
+      const DEFAULT_STAGES = Object.keys(STAGE_DEADLINES).map(n => ({ name:n, start:null, end:null, completed:false }));
+      const SHEET_DEADLINE_LABEL = '8h 20m';
+      const fmtDateKey = (d=new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      const fmtSheetName = (d=new Date(), n=1) => `${String(d.getDate()).padStart(2,'0')}-${String(d.getMonth()+1).padStart(2,'0')}-${d.getFullYear()}/${n}`;
+
+      const Progress = ({value=0}) => {
+        const v = Math.min(100, Math.max(0, value));
+        return (<div className="w-full h-2 bg-gray-200 rounded"><div className="h-2" style={{background:'#111827',width:`${v}%`,borderRadius:'.25rem'}} /></div>);
+      };
+
+      function Card({ className='', children }){ return <div className={`bg-white rounded-2xl shadow ${className}`}>{children}</div> }
+      function CardContent({ className='', children }){ return <div className={className}>{children}</div> }
+      function Button({ variant='default', size='md', className='', ...props }){
+        const base='rounded-2xl px-4 py-2 text-sm font-medium shadow';
+        const v = variant==='outline' ? 'btn btn-outline' : 'btn';
+        return <button className={`${v} ${className}`} {...props}/>;
+      }
+      function Input({ className='', ...props }){ return <input className={`border rounded p-2 text-sm w-full ${className}`} {...props}/> }
+
+      function LabDashboard(){
+        const [activeTab, setActiveTab] = useState('dashboard');
+        const [sheetCountByDate, setSheetCountByDate] = useState({});
+        const [sheets, setSheets] = useState(() => {
+          const samples = Array.from({length:20}, (_,i)=>({ id:i+1, name:`Muestra ${i+1}`, addedAt:new Date(), stages:JSON.parse(JSON.stringify(DEFAULT_STAGES)), type:i%2===0?'Metálico':'No Metálico', analyst:'—' }));
+          const createdAt = new Date(); const dateKey = fmtDateKey(createdAt); const initialCount = 1;
+          return [{ id: Math.random().toString(36).slice(2), name: fmtSheetName(createdAt, initialCount), createdAt, dateKey, samples }];
+        });
+        const [filterDate, setFilterDate] = useState('');
+        const [selectedSheetId, setSelectedSheetId] = useState('');
+        const [expandedSheets, setExpandedSheets] = useState([]);
+        const [bulkRows, setBulkRows] = useState([{ id:'', name:'', type:'Metálico', analyst:'' }]);
+
+        useEffect(()=>{ if(!selectedSheetId && sheets[0]?.id) setSelectedSheetId(sheets[0].id) }, [sheets, selectedSheetId]);
+
+        const stagesList = Object.keys(STAGE_DEADLINES);
+        const calcSample = (stages)=> (stages.filter(s=>s.completed).length / stages.length) * 100;
+        const calcSheet = (sheet)=> sheet.samples.length ? sheet.samples.reduce((a,s)=>a+calcSample(s.stages),0)/sheet.samples.length : 0;
+        const elapsed = (t)=>{ const now=new Date(); const diff= now - new Date(t); const h=Math.floor(diff/1000/60/60); const m=Math.floor((diff/1000/60)%60); return `${h}h ${m}m`; };
+
+        const complianceGeneral = 87;
+        const complianceByStage = [{name:'Ingreso',value:95},{name:'Pesaje',value:85},{name:'Ataque',value:80},{name:'Lectura',value:75},{name:'Reporte',value:70},{name:'Validación',value:90}];
+        const COLORS = ['#10B981','#3B82F6','#F59E0B','#EF4444','#8B5CF6','#EC4899'];
+
+        const registerStageTimeForSheet = (sheetId, stageName, type, analystName) => {
+          setSheets(prev => prev.map(sheet => {
+            if(sheet.id !== sheetId) return sheet;
+            const nowLabel = new Date().toLocaleTimeString();
+            return { ...sheet, samples: sheet.samples.map(s => ({ ...s, analyst: analystName?analystName:s.analyst, stages: s.stages.map(st => st.name!==stageName?st:(type==='inicio'?{...st,start:st.start||nowLabel}:{...st,end:nowLabel,completed:true})) })) };
+          }));
+        };
+
+        const filteredSheets = sheets.filter(s => filterDate ? s.dateKey === filterDate : true);
+        const totalMuestras = sheets.reduce((a,sh)=>a+sh.samples.length,0);
+        const muestrasCompletas = sheets.reduce((a,sh)=>a+sh.samples.filter(s=>s.stages.every(st=>st.completed)).length,0);
+        const muestrasEnCurso = totalMuestras - muestrasCompletas;
+
+        const allSamples = sheets.flatMap(sh=>sh.samples);
+        const analystOptions = ['Todos', ...Array.from(new Set(allSamples.map(s=>s.analyst).filter(Boolean)))];
+        const [filterAnalystKPI, setFilterAnalystKPI] = useState('Todos');
+        const samplesForKPI = filterAnalystKPI==='Todos'? allSamples : allSamples.filter(s=>s.analyst===filterAnalystKPI);
+
+        const stageNames = Object.keys(STAGE_DEADLINES);
+        const avgByStage = stageNames.map(st => { const base = STAGE_DEADLINES[st]; const factor = 0.9 + ((st.charCodeAt(0) % 5) * 0.03); return { etapa: st, minutos: Math.round(base*factor) }; });
+        const totalBase = Object.values(STAGE_DEADLINES).reduce((a,b)=>a+b,0);
+        const tatSamples = samplesForKPI.length? samplesForKPI : allSamples;
+        const simulatedTAT = tatSamples.map((s,i)=>{ const baseId= typeof s.id==='number'? s.id : i; const factor = 0.85 + ((baseId % 7) * 0.04); return Math.round(totalBase * factor); });
+        const buckets = [{rango:'0-120',min:0,max:120},{rango:'121-240',min:121,max:240},{rango:'241-360',min:241,max:360},{rango:'361-480',min:361,max:480},{rango:'481-600',min:481,max:600},{rango:'>600',min:601,max:Infinity}];
+        const tatHistogram = buckets.map(b => ({ rango:b.rango, muestras: simulatedTAT.filter(v=>v>=b.min && v<=b.max).length }));
+
+        const [stageAction, setStageAction] = useState(stagesList[0] || 'Ingreso');
+        const [actionType, setActionType] = useState('inicio');
+        const [actionAnalyst, setActionAnalyst] = useState('');
+
+        return (
+          <div className="min-h-screen bg-gray-100 p-6">
+            <header className="mb-4 flex justify-between items-center">
+              <h1 className="text-2xl font-bold">Dashboard de Laboratorio</h1>
+              <div className="flex gap-2">
+                <Button variant={activeTab==='dashboard'?'default':'outline'} onClick={()=>setActiveTab('dashboard')}>Panel</Button>
+                <Button variant={activeTab==='kpi'?'default':'outline'} onClick={()=>setActiveTab('kpi')}>KPI</Button>
+                <Button variant={activeTab==='ingreso'?'default':'outline'} onClick={()=>setActiveTab('ingreso')}>Ingreso de Muestras</Button>
+                <Button variant="outline">Cerrar Sesión</Button>
+              </div>
+            </header>
+
+            {activeTab==='kpi' && (<>
+              <div className="mb-4 flex flex-wrap items-center gap-2">
+                <label className="text-sm">Analista:</label>
+                <select className="border rounded p-2 text-sm" value={filterAnalystKPI} onChange={e=>setFilterAnalystKPI(e.target.value)}>
+                  {analystOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-1 gap-6 mb-6">
+                <Card>
+                  <CardContent className="p-6 text-center">
+                    <h2 className="text-lg font-semibold mb-2">Cumplimiento General</h2>
+                    <div className="relative" style={{height:220}}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie data={[{name:'Cumplido',value:87},{name:'Incumplido',value:13}]} cx="50%" cy="50%" innerRadius={60} outerRadius={90} dataKey="value">
+                            <Cell fill="#10B981"/><Cell fill="#E5E7EB"/>
+                          </Pie>
+                        </PieChart>
+                      </ResponsiveContainer>
+                      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                        <span className="text-2xl font-bold">87%</span>
+                      </div>
+                    </div>
+                    <div className="mt-3 text-sm text-gray-500">SLA global: {SHEET_DEADLINE_LABEL}</div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              <Card className="mb-6">
+                <CardContent className="p-6">
+                  <h2 className="text-lg font-semibold mb-4">% Cumplimiento por Etapa</h2>
+                  <div className="flex flex-wrap gap-6 justify-center">
+                    {complianceByStage.map((c, idx) => (
+                      <div key={c.name} className="text-center">
+                        <div style={{ width: 140, height: 140 }} className="relative">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <PieChart>
+                              <Pie data={[{name:'Cumplido',value:c.value},{name:'Incumplido',value:100-c.value}]} cx="50%" cy="50%" innerRadius={40} outerRadius={60} dataKey="value">
+                                <Cell fill={COLORS[idx % COLORS.length]} /><Cell fill="#E5E7EB" />
+                              </Pie>
+                            </PieChart>
+                          </ResponsiveContainer>
+                          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                            <span className="text-sm font-semibold">{c.value}%</span>
+                          </div>
+                        </div>
+                        <div className="mt-2 text-sm font-medium">{c.name}</div>
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card className="mb-6">
+                <CardContent className="p-6">
+                  <h2 className="text-lg font-semibold mb-4">Tiempo promedio por etapa (min)</h2>
+                  <div className="w-full h-[300px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={avgByStage} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="etapa" />
+                        <YAxis />
+                        <Tooltip />
+                        <Legend />
+                        <Bar dataKey="minutos" name="Minutos" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">* Valores simulados a partir de los deadlines.</p>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardContent className="p-6">
+                  <h2 className="text-lg font-semibold mb-4">Distribución de TAT por muestra (min)</h2>
+                  <div className="w-full h-[300px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={tatHistogram} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="rango" />
+                        <YAxis />
+                        <Tooltip />
+                        <Legend />
+                        <Bar dataKey="muestras" name="# Muestras" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">* Muestras consideradas: {samplesForKPI.length}. Mock para demo.</p>
+                </CardContent>
+              </Card>
+            </>)}
+
+            {activeTab==='dashboard' && (<>
+              <div className="grid grid-cols-1 gap-6 mb-6">
+                <Card><CardContent className="p-6 text-center"><h2 className="text-lg font-semibold">Tiempo Promedio</h2><p className="text-3xl font-bold">4.2h</p></CardContent></Card>
+              </div>
+
+              <div className="mb-3 flex items-center gap-2">
+                <label className="text-sm">Filtrar por fecha:</label>
+                <input type="date" className="border rounded p-2 text-sm" value={filterDate} onChange={(e)=>setFilterDate(e.target.value)} />
+                {filterDate && (<Button variant="outline" onClick={()=>setFilterDate('')}>Limpiar</Button>)}
+              </div>
+
+              <Card>
+                <CardContent className="p-4">
+                  <h2 className="text-xl font-semibold mb-4">Hojas de trabajo</h2>
+                  <div className="overflow-x-auto">
+                    <table className="w-full border-collapse text-sm">
+                      <thead><tr className="bg-gray-200 text-left"><th className="p-2">Nombre</th><th className="p-2">Creación</th><th className="p-2"># Muestras</th><th className="p-2">Progreso</th><th className="p-2">Deadline</th><th className="p-2">Detalle</th></tr></thead>
+                      <tbody>
+                      {filteredSheets.map(sheet => (
+                        <React.Fragment key={sheet.id}>
+                          <tr className="border-b hover:bg-gray-50">
+                            <td className="p-2 font-medium">{sheet.name}</td>
+                            <td className="p-2">{new Date(sheet.createdAt).toLocaleString('es-CL',{dateStyle:'short', timeStyle:'short'})}</td>
+                            <td className="p-2">{sheet.samples.length}</td>
+                            <td className="p-2"><Progress value={calcSheet(sheet)} /><span className="text-sm text-gray-500">{calcSheet(sheet).toFixed(0)}%</span></td>
+                            <td className="p-2">{SHEET_DEADLINE_LABEL}</td>
+                            <td className="p-2"><Button variant="outline" onClick={()=> setExpandedSheets(prev => prev.includes(sheet.id) ? prev.filter(id=>id!==sheet.id) : [...prev, sheet.id]) }>{ expandedSheets.includes(sheet.id) ? 'Ocultar' : 'Ver' }</Button></td>
+                          </tr>
+                          {expandedSheets.includes(sheet.id) ? (
+                            <tr><td colSpan="6" className="p-0 bg-gray-50">
+                              <div className="p-3">
+                                <div className="text-sm font-medium mb-2">Muestras en {sheet.name}</div>
+                                <div className="overflow-x-auto">
+                                  <table className="w-full border-collapse text-xs">
+                                    <thead><tr className="bg-gray-2 00 text-left"><th className="p-2">ID</th><th className="p-2">Nombre</th><th className="p-2">Tipo</th><th className="p-2">Analista</th><th className="p-2">Progreso</th><th className="p-2">Tiempo</th><th className="p-2">Deadline</th></tr></thead>
+                                    <tbody>
+                                      {sheet.samples.map(s => (
+                                        <tr key={s.id} className="border-b">
+                                          <td className="p-2">{s.id}</td><td className="p-2">{s.name}</td><td className="p-2">{s.type}</td><td className="p-2">{s.analyst}</td>
+                                          <td className="p-2"><Progress value={calcSample(s.stages)} /><span className="text-\[11px\] text-gray-500">{calcSample(s.stages).toFixed(0)}%</span></td>
+                                          <td className="p-2">{elapsed(s.addedAt)}</td><td className="p-2">{SHEET_DEADLINE_LABEL}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+                            </td></tr>
+                          ) : null}
+                        </React.Fragment>
+                      ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card className="mt-6">
+                <CardContent className="p-4">
+                  <h2 className="text-lg font-semibold mb-2">Registro Rápido de Avance (por Hoja)</h2>
+                  <div className="flex flex-wrap gap-2 items-center">
+                    <select className="border rounded p-2 text-sm" value={selectedSheetId} onChange={e=>setSelectedSheetId(e.target.value)}>
+                      {filteredSheets.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
+                    <select className="border rounded p-2 text-sm" value={stageAction} onChange={e=>setStageAction(e.target.value)}>
+                      {stagesList.map(stage => <option key={stage} value={stage}>{stage}</option>)}
+                    </select>
+                    <select className="border rounded p-2 text-sm" value={actionType} onChange={e=>setActionType(e.target.value)}>
+                      <option value="inicio">Registrar Inicio</option>
+                      <option value="fin">Registrar Fin</option>
+                    </select>
+                    <Input className="w-48" placeholder="Analista" value={actionAnalyst} onChange={e=>setActionAnalyst(e.target.value)} />
+                    <Button onClick={()=> selectedSheetId && registerStageTimeForSheet(selectedSheetId, stageAction, actionType, actionAnalyst)}>Registrar Hora</Button>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">* Aplica la hora del sistema a todas las muestras de la hoja seleccionada.</p>
+                </CardContent>
+              </Card>
+            </>)}
+
+            {activeTab==='ingreso' && (<>
+              <Card>
+                <CardContent className="p-4">
+                  <h2 className="text-xl font-semibold mb-4">Ingreso de Muestras (Nueva hoja de trabajo)</h2>
+                  <div className="overflow-x-auto">
+                    <table className="w-full border-collapse text-sm">
+                      <thead><tr className="bg-gray-200 text-left"><th className="p-2">ID</th><th className="p-2">Nombre/Descripción</th><th className="p-2">Tipo</th><th className="p-2">Analista</th><th className="p-2">Acciones</th></tr></thead>
+                      <tbody>
+                        {bulkRows.map((row, idx) => (
+                          <tr key={idx} className="border-b">
+                            <td className="p-2 w-32"><Input value={row.id} onChange={e=>{ const v=[...bulkRows]; v[idx]={...v[idx], id:e.target.value}; setBulkRows(v); }} placeholder="ID" /></td>
+                            <td className="p-2"><Input value={row.name} onChange={e=>{ const v=[...bulkRows]; v[idx]={...v[idx], name:e.target.value}; setBulkRows(v); }} placeholder="Nombre o descripción" /></td>
+                            <td className="p-2 w-48">
+                              <select className="border rounded p-2 w-full" value={row.type} onChange={e=>{ const v=[...bulkRows]; v[idx]={...v[idx], type:e.target.value}; setBulkRows(v); }}>
+                                <option>Metálico</option>
+                                <option>No Metálico</option>
+                              </select>
+                            </td>
+                            <td className="p-2 w-56"><Input value={row.analyst} onChange={e=>{ const v=[...bulkRows]; v[idx]={...v[idx], analyst:e.target.value}; setBulkRows(v); }} placeholder="Analista asignado" /></td>
+                            <td className="p-2 w-32"><Button variant="outline" onClick={()=>{ const v=[...bulkRows]; v.splice(idx,1); setBulkRows(v); }}>Quitar</Button></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="flex justify-between mt-4">
+                    <Button variant="outline" onClick={()=> setBulkRows([...bulkRows, {id:'', name:'', type:'Metálico', analyst:''}])}>+ Agregar muestra</Button>
+                    <div className="flex gap-2">
+                      <Button variant="outline" onClick={()=> setActiveTab('dashboard')}>Cancelar</Button>
+                      <Button onClick={()=> {
+                        const sanitized = bulkRows.map(r=> ({...r, id:String(r.id).trim(), name:(r.name||'').trim(), analyst:(r.analyst||'').trim()}))
+                          .filter(r => r.id!=='' && (r.type==='Metálico' || r.type==='No Metálico'));
+                        if(!sanitized.length) return;
+                        const newSamples = sanitized.map((r,i)=> ({
+                          id: isNaN(Number(r.id)) ? r.id : Number(r.id),
+                          name: r.name || `Muestra ${r.id}`,
+                          addedAt: new Date(),
+                          stages: JSON.parse(JSON.stringify(DEFAULT_STAGES)),
+                          type: r.type,
+                          analyst: r.analyst || '—',
+                        }));
+                        const createdAt = new Date(); const dateKey = fmtDateKey(createdAt);
+                        const count = (sheetCountByDate[dateKey] || 0) + 1;
+                        const newSheet = { id: Math.random().toString(36).slice(2), name: fmtSheetName(createdAt, count), createdAt, dateKey, samples:newSamples };
+                        setSheets(prev => [newSheet, ...prev]);
+                        setSheetCountByDate(prev => ({...prev, [dateKey]: count}));
+                        setSelectedSheetId(newSheet.id);
+                        setBulkRows([{ id:'', name:'', type:'Metálico', analyst:'' }]);
+                        setActiveTab('dashboard');
+                      }}>Guardar hoja</Button>
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">* Se crea una nueva hoja nombrada por fecha y número del día.</p>
+                </CardContent>
+              </Card>
+            </>)}
+          </div>
+        );
+      }
+
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(<LabDashboard/>);
+    </script>
+  </body>
+</html>
